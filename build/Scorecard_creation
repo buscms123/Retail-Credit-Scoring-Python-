@@ -1,0 +1,333 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Jan 28 11:02:43 2021
+
+@author: senay
+"""
+#%% Data Cleaning / Split
+# import packages
+import pandas as pd
+import pprint as pp
+import numpy as np
+import pandasql as ps
+from pandasql import sqldf
+pysqldf = lambda q: sqldf(q, globals())
+
+# import data
+accepted_customers = pd.read_csv(r'C:\Users\senay\OneDrive\MSA\Classes\Financial Analytics\Homework\1\accepted_customers.csv')
+rejected_customers =  pd.read_csv(r'C:\Users\senay\OneDrive\MSA\Classes\Financial Analytics\Homework\1\rejected_customers.csv')
+
+
+# see all variables in each dataset
+accepted_customers_cols = []
+
+for col in accepted_customers:
+    accepted_customers_cols.append(col)
+    
+rejected_customers_cols = []
+
+for col in rejected_customers:
+    rejected_customers_cols.append(col)
+
+pp.pprint(accepted_customers_cols)
+pp.pprint(rejected_customers_cols)
+
+# Variables that are not allowed to be used for credit score cards:
+#     “Under ECOA and Regulation B, lenders are prohibited from using credit 
+#      scoring systems that take into account any prohibited basis, except for age. 
+#      Lenders are not permitted to use a credit scoring system that considers race, 
+#      color, religion, national origin, or sex to evaluate an applicant’s creditworthiness. 
+#      ECOA and Regulation B allow lenders to consider age as a predictive factor in an empirically 
+#      derived, demonstrably and statistically sound, credit scoring system”
+ 
+# Need to drop Nationality and Age from both files
+accepted_customers = accepted_customers.drop(['NAT', 'AGE'], axis=1)
+rejected_customers = rejected_customers.drop(['NAT', 'AGE'], axis=1)
+
+pp.pprint(accepted_customers)
+pp.pprint(rejected_customers)
+
+# Need to convert categorical variables to dummy variables
+# Variables that need to be converted:
+    # 1. PRODUCTS
+    # 2. RESID
+    # 3. PROF
+    # 4. CARS
+    
+accepted_customers = pd.get_dummies(accepted_customers, dummy_na=True)    
+pp.pprint(accepted_customers)
+
+rejected_customers = pd.get_dummies(rejected_customers, dummy_na=True)    
+pp.pprint(rejected_customers)
+
+
+# Check for missing values
+accepted_customers_missing = accepted_customers[accepted_customers.isna().any(axis=1)]
+rejected_customers_missing = rejected_customers[rejected_customers.isna().any(axis=1)]
+
+print(accepted_customers_missing)
+print(rejected_customers_missing)
+# There are missing values in RESID, but binning     
+
+#%% Initial Scorecard
+# scorecardpy
+import scorecardpy as sc
+
+# filter variable via missing rate, iv, identical value rate
+accepted_customers_f = sc.var_filter(accepted_customers, y="GB", iv_limit=0.1)
+
+# Create training and validation data sets 70/30 split
+accepted_customers_training, accepted_customers_validation = \
+    np.split(accepted_customers_f.sample(frac=1, random_state=12345),
+             [int(.7*len(accepted_customers_f))])
+    
+# WOE Binning
+bins = sc.woebin(accepted_customers_f, y="GB")
+#Visualize Bins
+sc.woebin_plot(bins)
+
+# adjust breaks interactively
+# breaks_adj = sc.woebin_adj(accepted_customers, "GB", bins) 
+bins_adj = bins
+
+# converting train and test into woe values
+train_woe = sc.woebin_ply(accepted_customers_training, bins)
+validation_woe = sc.woebin_ply(accepted_customers_validation, bins)
+
+y_train = train_woe.loc[:,'GB']
+X_train = train_woe.loc[:,train_woe.columns != 'GB']
+y_test = validation_woe.loc[:,'GB']
+X_test = validation_woe.loc[:,train_woe.columns != 'GB']
+                 
+     
+        # logistic regression ------
+from sklearn.linear_model import LogisticRegression
+lr = LogisticRegression(penalty='l2', C=0.125, solver='saga')
+lr.fit(X_train, y_train)
+# lr.coef_
+# lr.intercept_      
+                
+# predicted proability
+train_pred = lr.predict_proba(X_train)[:,1]
+test_pred = lr.predict_proba(X_test)[:,1]              
+                
+# performance ks & roc ------
+train_perf = sc.perf_eva(y_train, train_pred, title = "train")
+test_perf = sc.perf_eva(y_test, test_pred, title = "test")              
+                
+# score ------
+card = sc.scorecard(bins_adj, lr, X_train.columns)
+# credit score
+train_score = sc.scorecard_ply(accepted_customers_training, card, print_step=0)
+test_score = sc.scorecard_ply(accepted_customers_validation, card, print_step=0)  
+
+# Append scores to data
+accepted_customers_training['score'] = train_score
+accepted_customers_validation['score'] = test_score
+
+accepted_customers_s = accepted_customers_training
+                   
+ 
+# psi
+sc.perf_psi(
+  score = {'train':train_score, 'test':test_score},
+  label = {'train':y_train, 'test':y_test}
+)  
+              
+
+#%% Reject Inferencing
+
+# Apply model to rejected_dataset
+reject_score = sc.scorecard_ply(rejected_customers, card, print_step=0)
+
+# Append score to rejected_customers
+rejected_customers_s = rejected_customers[['CARDS_no credit cards', 'PERS_H', 'INCOME', 'CARDS_Cheque card', 'TMJOB1', 'EC_CARD']]
+rejected_customers_s['score'] = reject_score
+
+pp.pprint(rejected_customers_s)
+
+# datasets to move forward with:
+    # accepted_customers_s
+    # rejected_customers_s
+
+# QUERIES:
+    
+q1 = """
+SELECT *
+FROM accepted_customers_s
+WHERE score < 350
+"""
+
+ACC_BIN_LT350 = pysqldf(q1)
+
+q2 = """
+SELECT *
+FROM accepted_customers_s
+WHERE score > 350 and score < 400
+"""
+
+ACC_BIN_351_400 = pysqldf(q2)
+
+q3 = """
+SELECT *
+FROM accepted_customers_s
+WHERE score > 401 and score < 450
+"""
+
+ACC_BIN_401_450 = pysqldf(q3)
+
+q4 = """
+SELECT *
+FROM accepted_customers_s
+WHERE score > 450
+"""
+
+ACC_BIN_GT450 = pysqldf(q4)
+
+# QUERIES PRINT:
+    
+# ACCEPTED BINS
+pp.pprint(ACC_BIN_LT350)
+pp.pprint(ACC_BIN_351_400)
+pp.pprint(ACC_BIN_401_450)
+pp.pprint(ACC_BIN_GT450)
+
+
+q5 = """
+SELECT *
+FROM rejected_customers_s
+WHERE score < 350
+"""
+
+REJ_BIN_LT350 = pysqldf(q5)
+
+q6 = """
+SELECT *
+FROM rejected_customers_s
+WHERE score > 350 and score < 400
+"""
+
+REJ_BIN_351_400 = pysqldf(q6)
+
+q7 = """
+SELECT *
+FROM rejected_customers_s
+WHERE score > 401 and score < 450
+"""
+
+REJ_BIN_401_450 = pysqldf(q7)
+
+q8 = """
+SELECT *
+FROM rejected_customers_s
+WHERE score > 450
+"""
+
+REJ_BIN_GT450 = pysqldf(q8)
+
+# REJECTED BINS
+pp.pprint(REJ_BIN_LT350)
+pp.pprint(REJ_BIN_351_400)
+pp.pprint(REJ_BIN_401_450)
+pp.pprint(REJ_BIN_GT450)
+
+# BINS:
+    # ACC_BIN_LT350
+    # ACC_BIN_351_400
+    # ACC_BIN_401_450
+    # ACC_BIN_GT450
+    # REJ_BIN_LT350
+    # REJ_BIN_351_400
+    # REJ_BIN_401_450
+    # REJ_BIN_GT450
+
+acc_bins = [ACC_BIN_LT350, ACC_BIN_351_400, ACC_BIN_401_450, ACC_BIN_GT450]
+acc_bins_txt = ['ACC_BIN_LT350', 'ACC_BIN_351_400', 'ACC_BIN_401_450', 'ACC_BIN_GT450']
+        
+bad_pct = []
+for i in acc_bins:
+   bad_pct.append(i['GB'][i['GB'] == 1].count() / len(i))
+
+def rej_bin(rej_bin, percent):
+    for i in rej_bin:
+        if i['index'] <= len(i)*percent:
+            i['GB'] = 1
+
+rej_bins = [REJ_BIN_LT350, REJ_BIN_351_400, REJ_BIN_401_450, REJ_BIN_GT450]
+
+import random
+random.sample(range(100), 10)
+
+count = 0
+for i in rej_bins:
+    rej_bin(i, bad_pct[count])
+    count = count + 1
+
+    
+import numpy as np
+from pandasql import sqldf
+
+# create a list of our conditions
+rejected_conditions = [(rejected_customers_s['score'] <=350),
+    (rejected_customers_s['score']<=400) & (rejected_customers_s['score']>350),
+    (rejected_customers_s['score']<=450) & (rejected_customers_s['score']>400),
+    (rejected_customers_s['score']>450)]
+
+
+# create a list of the values we want to assign for each condition
+values = ['REJ_BIN_LT350', 'REJ_BIN_351_400', 'REJ_BIN_401_450', 'REJ_BIN_GT450']
+
+
+# create bin column
+
+rejected_customers_s['bins'] = np.select(rejected_conditions, values)
+
+
+
+
+
+# Iterates through each of the bin labels and create random number
+# ranks that bin from 1: length of bin
+# assigns cutoff based on inference %s
+# Every number below cutoff is assigned 0, above a 1
+#data then joined back to rejected data set and new table "datasample" created
+ 
+ 
+ 
+data_sample=rejected_customers_s
+ranks=pd.DataFrame() 
+ 
+for rej in values:
+    i=0
+    rej=str(rej)
+    print(rej)
+    filtered=rejected_customers_s[rejected_customers_s['bins']==rej]
+    filtered[rej+'rand']=np.random.randint(1, 60000000,filtered.shape[0])
+    filtered[rej+'rank'] = filtered[rej+'rand'].rank()
+    len_filt=len(filtered)
+    for index in filtered.index:
+        if filtered.loc[index,rej+'rank'] <= (bad_pct[count]*len_filt) :
+            filtered.loc[index,rej+'GB'] = 1
+        else:
+            filtered.loc[index,rej+'GB'] = 0
+        
+    ranks=filtered[[rej+'GB']]
+    data_sample=data_sample.join(ranks,rsuffix=rej)
+    #
+    i=i+1
+
+
+#add up GB columns to make one GB column with 1 or 0
+data_sample['GB']=data_sample['REJ_BIN_LT350GB'].fillna(0)+data_sample['REJ_BIN_351_400GB'].fillna(0)+data_sample['REJ_BIN_401_450GB'].fillna(0)+ data_sample['REJ_BIN_GT450GB'].fillna(0)
+
+# add reject flag to make reject identifiable for future use
+data_sample['reject_flag']=1
+
+#creates table with both accepted and rejected values, GB contains 1 or 0 for all values. 
+accepted_plus_reject_inference=accepted_customers_f.append(data_sample)
+
+
+#Notes
+# Add Weights to logistic regressions 
+# Merge datasets after inferenceing and take another 70/30 split
+              
